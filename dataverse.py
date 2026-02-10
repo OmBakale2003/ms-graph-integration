@@ -1,25 +1,38 @@
 # dataverse.py
 import requests
-from auth import get_access_token
+from auth import get_dataverse_token
 import config
+import base64
+import json
+import math
+import uuid
+from pathlib import Path
 
-def list_accounts(top: int = 10):
-    token = get_access_token()
-    url = f"{config.ENV_URL}/api/data/v9.2/accounts"
-    params = {"$select": "name,accountnumber", "$top": str(top)}
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
+BLOCK_SIZE = 5 * 1024 * 1024
+
+
+def dataverse_headers(access_token: str):
+    return {
+        "Authorization": f"Bearer {access_token}",
         "OData-MaxVersion": "4.0",
         "OData-Version": "4.0",
+        "Accept": "application/json",
+        "Content-Type": "application/json"
     }
+
+
+def list_accounts(top: int = 10):
+    token = get_dataverse_token()
+    url = f"{config.ENV_URL}/api/data/v9.2/accounts"
+    params = {"$select": "name,accountnumber", "$top": str(top)}
+    headers = dataverse_headers(token)
     resp = requests.get(url, headers=headers, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json().get("value", [])
 
-def list_test_1(top: int = 5):
-    """Fetch rows from the cr277_test_1 Dataverse table"""
-    token = get_access_token()
+""" def list_test_1(top: int = 5):
+    #Fetch rows from the cr277_test_1 Dataverse table
+    token = get_dataverse_token()
     base = config.ENV_URL.rstrip('/')
 
     # Use the EXACT EntitySetName from metadata
@@ -42,45 +55,264 @@ def list_test_1(top: int = 5):
     resp.raise_for_status()
 
     return resp.json().get("value", [])
+ """
 
+def create_dataverse_row(
+    access_token: str,
+    environment_url: str,
+    entity_set_name: str,
+    table_logical_name:str,
+    row_data: dict
+) -> str:
+    """
+    Creates a Dataverse row and returns the row GUID.
+    """
 
-def find_test_table():
-    """Find exact EntitySetName for tables containing 'test' in LogicalName"""
-    token = get_access_token()
-    base = config.ENV_URL.rstrip('/')
+    url = f"{environment_url}/api/data/v9.2/{entity_set_name}"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
 
-    url = f"{base}/api/data/v9.2/EntityDefinitions?$select=LogicalName,EntitySetName,DisplayName"
+    response = requests.post(url, headers=headers, json=row_data)
+    response.raise_for_status()
+
+    return response.json()[f"{table_logical_name}id"]
+
+#csv upload function using the InitializeFileUpload Action.
+""" def upload_csv_file(
+    access_token: str,
+    environment_url: str,
+    table_logical_name: str,   
+    row_id: str,               
+    file_column: str,          
+    file_path: str,
+    block_size: int = 4 * 1024 * 1024  
+):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "OData-Version": "4.0",
+        "OData-MaxVersion": "4.0",
+        "Accept": "application/json"
+    }
+
+    path = Path(file_path)
+    file_name = path.name
+    file_bytes = path.read_bytes()
+
+    entity_set_name = f"{table_logical_name}s"
+
+    # 1️⃣ Initialize file upload 
+    init_url = (
+        f"{environment_url}/api/data/v9.2/"
+        f"{entity_set_name}({row_id})/"
+        f"Microsoft.Dynamics.CRM.InitializeFileUpload"
+    )
+
+    init_payload = {
+        "FileAttributeName": file_column,
+        "FileName": file_name
+    }
+
+    init_resp = requests.post(init_url, headers=headers, json=init_payload)
+    init_resp.raise_for_status()
+    upload_id = init_resp.json()["FileUploadId"]
+
+    # 2️⃣ Upload file blocks 
+    total_blocks = math.ceil(len(file_bytes) / block_size)
+
+    upload_block_url = (
+        f"{environment_url}/api/data/v9.2/"
+        f"Microsoft.Dynamics.CRM.UploadBlock"
+    )
+
+    for i in range(total_blocks):
+        block = file_bytes[i * block_size:(i + 1) * block_size]
+        block_id = base64.b64encode(f"block-{i}".encode()).decode()
+
+        upload_payload = {
+            "FileUploadId": upload_id,
+            "BlockId": block_id,
+            "BlockData": base64.b64encode(block).decode()
+        }
+
+        resp = requests.post(upload_block_url, headers=headers, json=upload_payload)
+        resp.raise_for_status()
+
+    # 3️⃣ Commit file upload 
+    commit_url = (
+        f"{environment_url}/api/data/v9.2/"
+        f"Microsoft.Dynamics.CRM.CommitFileUpload"
+    )
+
+    commit_payload = {
+        "FileUploadId": upload_id,
+        "FileName": file_name,
+        "MimeType": "text/csv"
+    }
+
+    commit_resp = requests.post(commit_url, headers=headers, json=commit_payload)
+    commit_resp.raise_for_status()
+
+    return "CSV uploaded successfully"
+
+def upload_csv_simple(
+    access_token: str,
+    environment_url: str,
+    entity_set_name: str,
+    row_id: str,
+    file_column: str,
+    file_path: str
+):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/octet-stream",
+        "Accept": "application/json",
+        "If-Match": "*"   # REQUIRED
+    }
+
+    file_bytes = Path(file_path).read_bytes()
+
+    url = (
+        f"{environment_url}/api/data/v9.2/"
+        f"{entity_set_name}({row_id})/"
+        f"{file_column}/$value"
+    )
+
+    resp = requests.put(url, headers=headers, data=file_bytes)
+    resp.raise_for_status()
+
+    return "CSV uploaded successfully via $value"
+ """
+
+#csv upload using simple patch http request
+""" def upload_csv_file(entity_uri: str, csv_path: str,file_column: str):
+    
+    #Upload CSV to Dataverse using attachment navigation property.
+    #Works even when File APIs / Attachments toggle are unavailable.
+    
+    token = get_dataverse_token()
+
+    upload_url = f"{entity_uri}/{file_column}"
 
     headers = {
         "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "OData-MaxVersion": "4.0",
-        "OData-Version": "4.0",
+        "Content-Type": "application/octet-stream",
     }
 
-    resp = requests.get(url, headers=headers)
+    with open(csv_path, "rb") as f:
+        resp = requests.patch(upload_url, headers=headers, data=f)
+
+    resp.raise_for_status()
+    print(" CSV uploaded successfully")
+ """
+ 
+ #csv upload funtion using InitializeFileBlocksUpload action
+def upload_file_to_dataverse(
+    access_token: str,
+    environment_url: str,      # https://org.crm.dynamics.com
+    entity_logical_name: str,  # account
+    primary_key_name: str,     # accountid
+    entity_id: str,            # GUID
+    file_column_name: str,     # sample_filecolumn (lowercase)
+    file_path: Path,
+    mime_type: str = "application/octet-stream",
+    max_size_kb: int | None = None
+) -> str:
+    """
+    Uploads a file to a Dataverse file column using block upload APIs.
+    Returns fileId (GUID).
+    """
+
+    headers = dataverse_headers(access_token)
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(file_path)
+
+    file_size = file_path.stat().st_size
+    if max_size_kb and (file_size / 1024) > max_size_kb:
+        raise Exception("File too large for this Dataverse file column")
+
+    # --------------------------------------------------
+    # 1. Initialize upload
+    # --------------------------------------------------
+    init_url = f"{environment_url}/api/data/v9.2/InitializeFileBlocksUpload"
+
+    init_payload = {
+        "Target": {
+            "@odata.type": f"Microsoft.Dynamics.CRM.{entity_logical_name}",
+            primary_key_name: entity_id
+        },
+        "FileAttributeName": file_column_name,
+        "FileName": file_path.name
+    }
+
+    init_resp = requests.post(init_url, headers=headers, json=init_payload)
+    init_resp.raise_for_status()
+
+    file_continuation_token = init_resp.json()["FileContinuationToken"]
+
+    # --------------------------------------------------
+    # 2. Upload blocks
+    # --------------------------------------------------
+    block_ids: list[str] = []
+
+    upload_block_url = f"{environment_url}/api/data/v9.2/UploadBlock"
+
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(BLOCK_SIZE)
+            if not chunk:
+                break
+
+            block_id = base64.b64encode(
+                str(uuid.uuid4()).encode("utf-8")
+            ).decode("utf-8")
+
+            block_ids.append(block_id)
+
+            upload_payload = {
+                "BlockId": block_id,
+                "BlockData": base64.b64encode(chunk).decode("utf-8"),
+                "FileContinuationToken": file_continuation_token
+            }
+
+            resp = requests.post(upload_block_url, headers=headers, json=upload_payload)
+            resp.raise_for_status()
+
+    # --------------------------------------------------
+    # 3. Commit upload
+    # --------------------------------------------------
+    commit_url = f"{environment_url}/api/data/v9.2/CommitFileBlocksUpload"
+
+    commit_payload = {
+        "FileName": file_path.name,
+        "MimeType": mime_type,
+        "BlockList": block_ids,
+        "FileContinuationToken": file_continuation_token
+    }
+
+    commit_resp = requests.post(commit_url, headers=headers, json=commit_payload)
+    commit_resp.raise_for_status()
+
+    return commit_resp.json()["FileId"]
+
+def download_csv_file(entity_uri: str, file_column: str, output_path: str):
+    token = get_dataverse_token()
+
+    download_url = f"{entity_uri}/{file_column}/$value"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+    }
+
+    resp = requests.get(download_url, headers=headers)
     resp.raise_for_status()
 
-    entities = resp.json().get("value", [])
+    with open(output_path, "wb") as f:
+        f.write(resp.content)
 
-    # Filter client-side
-    matches = [
-        e for e in entities
-        if "test" in e["LogicalName"].lower()
-    ]
-
-    for table in matches:
-        display = table.get("DisplayName", {}).get("LocalizedLabels", [])
-        display_name = display[0]["Label"] if display else "N/A"
-
-        print(f"Display: {display_name}")
-        print(f"Logical: {table['LogicalName']}")
-        print(f"API endpoint: {table['EntitySetName']}")
-        print("---")
-
-    return matches
-
-# Update main.py temporarily:
-# def main():
-
-
+    print("CSV downloaded successfully")
